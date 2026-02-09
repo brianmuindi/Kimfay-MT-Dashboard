@@ -6,3 +6,8 @@ openpyxl
 streamlit-authenticator
 PyYAML
 bcrypt
+io
+pathlib 
+numpy
+matplotlib
+typing
