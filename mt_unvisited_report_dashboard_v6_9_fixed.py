@@ -20,6 +20,45 @@ import streamlit as st
 import numpy as np
 
 # ----------------------------
+# ROBUST FILE READERS (handles big CSVs)
+# ----------------------------
+def _try_read_csv(uploaded, usecols=None, chunksize=None):
+    encodings = ["utf-8", "utf-8-sig", "latin1", "utf-16"]
+    seps = [",", ";", "\t", "|"]
+    last_err = None
+    for enc in encodings:
+        for sep in seps:
+            try:
+                uploaded.seek(0)
+                return pd.read_csv(
+                    uploaded,
+                    encoding=enc,
+                    sep=sep,
+                    usecols=usecols,
+                    chunksize=chunksize,
+                    low_memory=False,
+                )
+            except Exception as e:
+                last_err = e
+                continue
+    raise last_err if last_err else RuntimeError("Failed to read CSV")
+
+def robust_read_table(uploaded, usecols=None, chunksize=None):
+    name = (getattr(uploaded, "name", "") or "").lower()
+    if name.endswith(".csv"):
+        return _try_read_csv(uploaded, usecols=usecols, chunksize=chunksize)
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        uploaded.seek(0)
+        return pd.read_excel(uploaded, usecols=usecols, engine="openpyxl")
+    raise ValueError("Unsupported file type. Please upload CSV or Excel (.xlsx).")
+
+def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    return df
+
+
+# ----------------------------
 # STANDARD MASTER LISTS
 # ----------------------------
 STANDARD_SUPERVISORS = [
@@ -152,6 +191,125 @@ SAVED_OFFROUTE_NAME = "off_route_requests.xlsx"
 SAVED_LEAVE_NAME = "leave_management.csv"
 SAVED_STATUS_CSV_NAME = "status_update.csv"
 SAVED_STATUS_XLSX_NAME = "status_update.xlsx"
+
+
+# ----------------------------
+# LARGE-FILE PROCESSING (month-friendly)
+# ----------------------------
+def build_rep_region_map(reps_df: pd.DataFrame) -> dict:
+    reps_df = normalize_cols(reps_df)
+    rep_col = "REP" if "REP" in reps_df.columns else ("DSR" if "DSR" in reps_df.columns else None)
+    region_col = "REGION" if "REGION" in reps_df.columns else None
+    supervisor_col = "SUPERVISOR" if "SUPERVISOR" in reps_df.columns else None
+
+    if rep_col is None or region_col is None:
+        return {"rep_to_region": {}, "rep_to_supervisor": {}}
+
+    reps_df["REP_CLEAN"] = clean_name(reps_df[rep_col])
+    reps_df["REP_CLEAN"] = remove_test_reps(reps_df["REP_CLEAN"])
+    reps_df["REGION_CLEAN"] = reps_df[region_col].apply(standardize_region)
+
+    rep_to_region = dict(zip(reps_df["REP_CLEAN"], reps_df["REGION_CLEAN"]))
+
+    rep_to_supervisor = {}
+    if supervisor_col:
+        reps_df["SUP_CLEAN"] = reps_df[supervisor_col].apply(standardize_supervisor)
+        rep_to_supervisor = dict(zip(reps_df["REP_CLEAN"], reps_df["SUP_CLEAN"]))
+
+    return {"rep_to_region": rep_to_region, "rep_to_supervisor": rep_to_supervisor}
+
+def process_unvisited_chunk(df: pd.DataFrame, rep_maps: dict) -> pd.DataFrame:
+    df = normalize_cols(df)
+
+    rep_col = "REP" if "REP" in df.columns else ("SERVICED BY" if "SERVICED BY" in df.columns else ("DSR" if "DSR" in df.columns else None))
+    cust_col = "CUSTOMER" if "CUSTOMER" in df.columns else ("OUTLET" if "OUTLET" in df.columns else None)
+
+    df["REP"] = clean_name(df[rep_col]) if rep_col else pd.NA
+    df["REP"] = remove_test_reps(df["REP"])
+    df = df[df["REP"].notna()].copy()
+
+    rep_to_region = rep_maps.get("rep_to_region", {}) if rep_maps else {}
+    df["REGION"] = df["REP"].map(rep_to_region).apply(standardize_region)
+    df["REGION"] = df["REGION"].fillna("UNKNOWN / UNMAPPED")
+
+    rep_to_sup = rep_maps.get("rep_to_supervisor", {}) if rep_maps else {}
+    if rep_to_sup:
+        df["SUPERVISOR_CLEAN"] = df["REP"].map(rep_to_sup)
+    if "SUPERVISOR_CLEAN" in df.columns:
+        df["SUPERVISOR_CLEAN"] = df["SUPERVISOR_CLEAN"].apply(standardize_supervisor)
+
+    df["CUSTOMER"] = df[cust_col].astype("string") if cust_col else pd.NA
+    df["KEY_ACCOUNT_NAME"] = df["CUSTOMER"].apply(detect_key_account)
+    df["IS_KEY_ACCOUNT"] = df["KEY_ACCOUNT_NAME"].astype("string").str.strip() != ""
+
+    return df
+
+def load_unvisited_large(unvisited_file, rep_maps: dict, preview_limit: int = 200000):
+    """Stream big CSVs in chunks and compute aggregates; keep only a preview for UI."""
+    agg = {
+        "total": 0,
+        "by_rep": {},
+        "by_region": {},
+        "by_supervisor": {},
+        "key_overall": {k: 0 for k in STANDARD_KEY_ACCOUNTS},
+        "key_by_region": {},
+    }
+    preview_parts = []
+
+    name = (getattr(unvisited_file, "name", "") or "").lower()
+    if name.endswith(".csv"):
+        chunks = robust_read_table(unvisited_file, chunksize=200000)
+        for chunk in chunks:
+            c = process_unvisited_chunk(chunk, rep_maps)
+
+            agg["total"] += len(c)
+
+            for k, v in c["REP"].value_counts().items():
+                agg["by_rep"][k] = agg["by_rep"].get(k, 0) + int(v)
+
+            for k, v in c["REGION"].value_counts().items():
+                agg["by_region"][k] = agg["by_region"].get(k, 0) + int(v)
+
+            if "SUPERVISOR_CLEAN" in c.columns:
+                for k, v in c["SUPERVISOR_CLEAN"].value_counts().items():
+                    agg["by_supervisor"][k] = agg["by_supervisor"].get(k, 0) + int(v)
+
+            kc = c[c["IS_KEY_ACCOUNT"]]
+            if not kc.empty:
+                for ka, v in kc["KEY_ACCOUNT_NAME"].value_counts().items():
+                    if ka in agg["key_overall"]:
+                        agg["key_overall"][ka] += int(v)
+
+                for (reg, ka), v in kc.groupby(["REGION", "KEY_ACCOUNT_NAME"]).size().items():
+                    agg["key_by_region"].setdefault(reg, {k: 0 for k in STANDARD_KEY_ACCOUNTS})
+                    if ka in agg["key_by_region"][reg]:
+                        agg["key_by_region"][reg][ka] += int(v)
+
+            if sum(len(p) for p in preview_parts) < preview_limit:
+                preview_parts.append(c.head(max(0, preview_limit - sum(len(p) for p in preview_parts))))
+
+        preview_df = pd.concat(preview_parts, ignore_index=True) if preview_parts else pd.DataFrame()
+        return preview_df, agg
+
+    df = robust_read_table(unvisited_file)
+    df = process_unvisited_chunk(df, rep_maps)
+
+    agg["total"] = len(df)
+    agg["by_rep"] = df["REP"].value_counts().to_dict()
+    agg["by_region"] = df["REGION"].value_counts().to_dict()
+    if "SUPERVISOR_CLEAN" in df.columns:
+        agg["by_supervisor"] = df["SUPERVISOR_CLEAN"].value_counts().to_dict()
+
+    kc = df[df["IS_KEY_ACCOUNT"]]
+    if not kc.empty:
+        agg["key_overall"] = kc["KEY_ACCOUNT_NAME"].value_counts().reindex(STANDARD_KEY_ACCOUNTS, fill_value=0).to_dict()
+        for (reg, ka), v in kc.groupby(["REGION", "KEY_ACCOUNT_NAME"]).size().items():
+            agg["key_by_region"].setdefault(reg, {k: 0 for k in STANDARD_KEY_ACCOUNTS})
+            if ka in agg["key_by_region"][reg]:
+                agg["key_by_region"][reg][ka] += int(v)
+
+    return df.head(preview_limit).copy(), agg
+
 
 st.set_page_config(
     page_title="Unvisited Outlets Executive Dashboard",
