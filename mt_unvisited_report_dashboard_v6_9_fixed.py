@@ -18,7 +18,6 @@ from typing import Optional, Tuple
 import pandas as pd
 import streamlit as st
 import numpy as np
-import matplotlib.pyplot as plt
 
 # ----------------------------
 # STANDARD MASTER LISTS
@@ -430,49 +429,28 @@ def kpi_card(title: str, value: str, note: str = "") -> None:
 
 
 # ----------------------------
-# CHART HELPERS (matplotlib; no custom colors)
+# CHART HELPERS (Streamlit native; no matplotlib dependency)
 # ----------------------------
 def plot_bar(df: pd.DataFrame, x: str, y: str, title: str) -> None:
-    """Matplotlib bar plot that is safe with pandas.NA / missing values."""
     if df is None or df.empty or x not in df.columns or y not in df.columns:
         st.info("No data to plot for current filters.")
         return
-
+    st.subheader(title)
     d = df[[x, y]].copy()
     d[x] = d[x].astype("string").fillna("UNKNOWN")
     d[y] = pd.to_numeric(d[y], errors="coerce").fillna(0)
-
-    if d.empty:
-        st.info("No usable numeric data to plot.")
-        return
-
-    fig, ax = plt.subplots()
-    ax.bar(d[x].astype(str), d[y])
-    ax.set_title(title)
-    ax.tick_params(axis="x", labelrotation=45)
-    plt.tight_layout()
-    st.pyplot(fig, clear_figure=True)
-
+    d = d.set_index(x)
+    st.bar_chart(d[y])
 
 def plot_line(df: pd.DataFrame, x: str, y: str, title: str) -> None:
-    """Matplotlib line plot that is safe with pandas.NA / missing values."""
     if df is None or df.empty or x not in df.columns or y not in df.columns:
         st.info("No data to plot for current filters.")
         return
-
+    st.subheader(title)
     d = df[[x, y]].copy()
     d[y] = pd.to_numeric(d[y], errors="coerce").fillna(0)
-
-    if d.empty:
-        st.info("No usable numeric data to plot.")
-        return
-
-    fig, ax = plt.subplots()
-    ax.plot(d[x], d[y])
-    ax.set_title(title)
-    ax.tick_params(axis="x", labelrotation=45)
-    plt.tight_layout()
-    st.pyplot(fig, clear_figure=True)
+    d = d.sort_values(by=x).set_index(x)
+    st.line_chart(d[y])
 
 
 # ----------------------------
@@ -1397,3 +1375,4 @@ with tab_download:
         "- If **Status Update XLSX** fails to load, export it as **CSV** and upload the CSV.\n"
         "- If your merch file uses different column names, ensure it contains staff name + region (and supervisor if possible)."
     )
+    
