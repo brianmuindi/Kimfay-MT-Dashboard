@@ -2,13 +2,8 @@ txt
 
 streamlit
 pandas
+numpy
 openpyxl
-streamlit-authenticator
 PyYAML
 bcrypt
-io
-pathlib 
-numpy
-typing
-inspect
-annotations
+
