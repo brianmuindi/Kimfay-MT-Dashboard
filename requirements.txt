@@ -11,3 +11,5 @@ pathlib
 numpy
 matplotlib
 typing
+inspect
+matplotlib.pyplot
