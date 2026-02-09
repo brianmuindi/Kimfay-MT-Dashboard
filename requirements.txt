@@ -11,4 +11,4 @@ pathlib
 numpy
 typing
 inspect
-matplotlib.pyplot
+annotations
